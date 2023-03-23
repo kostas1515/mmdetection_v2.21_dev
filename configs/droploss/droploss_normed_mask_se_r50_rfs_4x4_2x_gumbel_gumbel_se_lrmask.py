@@ -258,7 +258,7 @@ data = dict(
         ],
         data_root='../../datasets/coco'))
 
-evaluation = dict(metric=['bbox', 'segm'], interval=24)
+evaluation = dict(metric=['bbox', 'segm'], interval=12)
 optimizer = dict(
     type='AdamW',
     lr=0.0002,

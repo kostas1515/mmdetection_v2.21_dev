@@ -5,5 +5,5 @@ model = dict(
     backbone=dict(
         depths=[2, 2, 18, 2],
         init_cfg=dict(type='Pretrained', checkpoint=pretrained)))
-work_dir = 'experiments/swin_s_1x_rfs'
+work_dir = 'experiments/seesaw_swin_s_1x_rfs'
 
