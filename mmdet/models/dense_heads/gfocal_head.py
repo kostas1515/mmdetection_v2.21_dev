@@ -10,7 +10,7 @@ from mmdet.core import (anchor_inside_flags, bbox2distance, bbox_overlaps,
                         reduce_mean, unmap)
 from ..builder import HEADS, build_loss
 from .anchor_head import AnchorHead
-
+import pandas as pd
 
 class Integral(nn.Module):
     """A fixed layer for calculating integral result from distribution.
@@ -104,6 +104,12 @@ class GFocalHead(AnchorHead):
         if add_mean:
             self.total_dim += 1
         print('total dim = ', self.total_dim * 4)
+        
+        
+#         lvis_file = pd.read_csv('../lvis_files/idf_1204.csv')
+#         self.image_count=torch.tensor(lvis_file['img_freq'].values.tolist()[:-1]+[0]).cuda()
+#         self.q_list = []
+#         self.c_list = []
 
         super(GFocalHead, self).__init__(num_classes, in_channels, **kwargs)
 
@@ -226,13 +232,39 @@ class GFocalHead(AnchorHead):
             stat = prob_topk
 
         quality_score = self.reg_conf(stat.reshape(N, -1, H, W))
+        
+        # for statistics
+#         cls_score_t = 1/(torch.exp(torch.exp(-torch.clamp(self.gfl_cls(cls_feat),min=-4,max=10))))
+#         max_scores = cls_score_t.max(dim=1,keepdim=True)[0]
+#         pred_class = cls_score_t.max(dim=1,keepdim=True)[1]
+#         strong_obj_mask = max_scores>0.001
+#         masked_max_scores = max_scores[strong_obj_mask]
+#         masked_max_class = pred_class[strong_obj_mask]
+        
+#         masked_max_class_freqs = torch.take(self.image_count.cuda(), masked_max_class.cuda())
+#         rare_class_freqs_mask = masked_max_class_freqs<10
+#         cor_quality_scores = quality_score[strong_obj_mask]
+
+#         self.q_list.append(cor_quality_scores[rare_class_freqs_mask])
+#         self.c_list.append(masked_max_scores[rare_class_freqs_mask])
+        
+        
         if self.use_gumbel is True:
             cls_score = 1/(torch.exp(torch.exp(-torch.clamp(self.gfl_cls(cls_feat),min=-4,max=10))))* quality_score
         else:
             cls_score = self.gfl_cls(cls_feat).sigmoid() * quality_score
 
         return cls_score, bbox_pred
-
+    
+#     def get_qualityLists(self,):
+#         overall_q=[]
+#         overall_c=[]
+#         for l in self.q_list:
+#             overall_q = overall_q + l.detach().cpu().tolist()
+#         for l in self.c_list:
+#             overall_c = overall_c + l.detach().cpu().tolist()
+#         return  overall_q,overall_c
+    
     def anchor_center(self, anchors):
         """Get anchor centers from anchors.
 
@@ -410,12 +442,13 @@ class GFocalHead(AnchorHead):
     def _get_bboxes_single(self,
                            cls_scores,
                            bbox_preds,
+                           score_factor_list,
                            mlvl_anchors,
-                           img_shape,
-                           scale_factor,
+                           img_meta,
                            cfg,
                            rescale=False,
-                           with_nms=True):
+                           with_nms=True,
+                          **kwargs):
         """Transform outputs for a single batch item into labeled boxes.
 
         Args:
@@ -447,6 +480,10 @@ class GFocalHead(AnchorHead):
                     predicted class label of the corresponding box.
         """
         cfg = self.test_cfg if cfg is None else cfg
+        img_shape = img_meta['img_shape']
+        scale_factor = img_meta['scale_factor']
+        nms_pre = cfg.get('nms_pre', -1)
+        
         assert len(cls_scores) == len(bbox_preds) == len(mlvl_anchors)
         mlvl_bboxes = []
         mlvl_scores = []
@@ -460,11 +497,12 @@ class GFocalHead(AnchorHead):
                 -1, self.cls_out_channels)
             bbox_pred = bbox_pred.permute(1, 2, 0)
             bbox_pred = self.integral(bbox_pred) * stride[0]
-
+            
             nms_pre = cfg.get('nms_pre', -1)
+            
             if nms_pre > 0 and scores.shape[0] > nms_pre:
                 max_scores, _ = scores.max(dim=1)
-                _, topk_inds = max_scores.topk(nms_pre)
+                _, topk_inds = max_scores.topk(nms_pre)                
                 anchors = anchors[topk_inds, :]
                 bbox_pred = bbox_pred[topk_inds, :]
                 scores = scores[topk_inds, :]

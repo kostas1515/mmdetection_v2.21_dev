@@ -11,7 +11,104 @@ from mmdet.core import (anchor_inside_flags, bbox_overlaps, build_assigner,
 from mmdet.core.utils import filter_scores_and_topk
 from ..builder import HEADS, build_loss
 from .anchor_head import AnchorHead
+from einops import rearrange
+from einops.layers.torch import Rearrange
 
+def posemb_sincos_2d(patches, temperature = 10000, dtype = torch.float32):
+    _, h, w, dim, device, dtype = *patches.shape, patches.device, patches.dtype
+
+    y, x = torch.meshgrid(torch.arange(h, device = device), torch.arange(w, device = device))
+    assert (dim % 4) == 0, 'feature dimension must be multiple of 4 for sincos emb'
+    omega = torch.arange(dim // 4, device = device) / (dim // 4 - 1)
+    omega = 1. / (temperature ** omega)
+
+    y = y.flatten()[:, None] * omega[None, :]
+    x = x.flatten()[:, None] * omega[None, :] 
+    pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim = 1)
+    return pe.type(dtype)
+
+
+class CrossLocClassAttention(nn.Module):
+    def __init__(self, patch_size, num_classes,num_boxes, emb_dim, heads, dim_head = 64):
+        super(CrossLocClassAttention, self).__init__()
+        self.patch_size=patch_size
+        self.num_classes=num_classes
+        self.num_boxes=num_boxes
+        
+        self.emb_dim = emb_dim
+        self.heads=heads
+        self.dim_head = dim_head
+        self.norm = nn.LayerNorm(emb_dim).cuda()
+        inner_dim = dim_head *  heads
+        
+        self.to_qkv_cls = nn.Linear(emb_dim, inner_dim * 3, bias = False).cuda()
+        self.to_out_cls = nn.Linear(inner_dim, emb_dim, bias = False).cuda()
+        
+        self.to_qkv_box = nn.Linear(emb_dim, inner_dim * 3, bias = False).cuda()
+        self.to_out_box = nn.Linear(inner_dim, emb_dim, bias = False).cuda()
+        
+        patch_dim_cls = patch_size*patch_size*(num_classes+1)
+        self.to_patch_embedding = torch.nn.Sequential(
+                    Rearrange('b c (h p1) (w p2) -> b h w (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+                    torch.nn.Linear(patch_dim_cls, emb_dim)
+                ).cuda()
+        
+        patch_dim_box = patch_size*patch_size*num_boxes
+        self.to_patch_embedding_box = torch.nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b h w (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+            torch.nn.Linear(patch_dim_box, emb_dim)
+        ).cuda()
+        
+        self.scale = dim_head ** -0.5
+        self.project_to_box = nn.Linear(emb_dim,  patch_size*patch_size*num_boxes).cuda()
+        self.project_to_class = nn.Linear(emb_dim,  patch_size*patch_size*num_classes).cuda()
+        
+    def forward(self, f_cls,f_box):
+        print(f_cls.shape)
+        x_cls = self.to_patch_embedding(f_cls)
+        pe = posemb_sincos_2d(x_cls)
+        x_cls = rearrange(x_cls, 'b ... d -> b (...) d') + pe
+
+        x_box = self.to_patch_embedding_box(f_box)
+        pe = posemb_sincos_2d(x_box)
+        x_box = rearrange(x_box, 'b ... d -> b (...) d') + pe
+
+        x_cls = self.norm(x_cls)
+        x_box = self.norm(x_box)
+
+        qkv_cls = self.to_qkv_cls(x_cls).chunk(3, dim = -1)
+        q_cls, k_cls, v_cls = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv_cls)
+
+        qkv_box = self.to_qkv_box(x_box).chunk(3, dim = -1)
+        q_box, k_box, v_box = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv_box)
+
+        dots = torch.matmul(q_cls, k_box.transpose(-1, -2)) * self.scale
+        attn = dots.softmax(dim=-1)
+        out_cls = torch.matmul(attn, v_cls)
+        out_cls = rearrange(out_cls, 'b h n d -> b n (h d)')
+        out_cls = self.to_out_cls(out_cls)
+
+        dots = torch.matmul(q_box, k_cls.transpose(-1, -2)) * self.scale
+        attn = dots.softmax(dim=-1)
+        out_box = torch.matmul(attn, v_box)
+        out_box = rearrange(out_box, 'b h n d -> b n (h d)')
+        out_box = self.to_out_box(out_box)
+
+        x_cls = x_cls + out_cls
+        x_box = x_box + out_box
+        
+        x_box = self.project_to_box(x_box)
+        
+        x_box_orig = rearrange(x_box,'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=int(f_box.shape[2]/self.patch_size), w=int(f_box.shape[3]/self.patch_size), c=self.num_boxes, p1=self.patch_size,p2=self.patch_size)
+
+        x_cls = self.project_to_class(x_cls)
+        x_cls_orig = rearrange(x_cls,'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=int(f_cls.shape[2]/self.patch_size), w=int(f_cls.shape[3]/self.patch_size), c=self.num_classes, p1=self.patch_size,p2=self.patch_size)
+
+        return x_cls_orig, x_box_orig
+        
+        
+        
+            
 
 class Integral(nn.Module):
     """A fixed layer for calculating integral result from distribution.
@@ -124,6 +221,8 @@ class GFLHead(AnchorHead):
 
         self.integral = Integral(self.reg_max)
         self.loss_dfl = build_loss(loss_dfl)
+        
+        self.cross_attend = CrossLocClassAttention(1, num_classes, 4*(self.reg_max+1), 256, 6, dim_head = 64)
 
     def _init_layers(self):
         """Initialize layers of the head."""
@@ -150,7 +249,7 @@ class GFLHead(AnchorHead):
                     padding=1,
                     conv_cfg=self.conv_cfg,
                     norm_cfg=self.norm_cfg))
-        assert self.num_anchors == 1, 'anchor free version'
+#         assert self.num_anchors == 1, 'anchor free version'
         self.gfl_cls = nn.Conv2d(
             self.feat_channels, self.cls_out_channels, 3, padding=1)
         self.gfl_reg = nn.Conv2d(
@@ -200,6 +299,9 @@ class GFLHead(AnchorHead):
             reg_feat = reg_conv(reg_feat)
         cls_score = self.gfl_cls(cls_feat)
         bbox_pred = scale(self.gfl_reg(reg_feat)).float()
+        
+        attn_cls,attn_bbox_pred = self.cross_attend(cls_score,bbox_pred)
+        
         return cls_score, bbox_pred
 
     def anchor_center(self, anchors):

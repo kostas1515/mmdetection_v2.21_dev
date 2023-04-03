@@ -12,10 +12,11 @@ from .maskiou_head import MaskIoUHead
 from .scnet_mask_head import SCNetMaskHead
 from .scnet_semantic_head import SCNetSemanticHead
 from .fcn_norm_mask_head import FCNNormMaskHead
+from .multi_fcn_mask_head import MultiFCNMaskHead
 
 __all__ = [
     'FCNMaskHead', 'HTCMaskHead', 'FusedSemanticHead', 'GridHead',
     'MaskIoUHead', 'CoarseMaskHead', 'MaskPointHead', 'SCNetMaskHead',
     'SCNetSemanticHead', 'GlobalContextHead', 'FeatureRelayHead',
-    'DynamicMaskHead','FCNNormMaskHead'
+    'DynamicMaskHead','FCNNormMaskHead','MultiFCNMaskHead'
 ]

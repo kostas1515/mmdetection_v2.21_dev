@@ -403,6 +403,7 @@ class BaseDenseHead(BaseModule, metaclass=ABCMeta):
             featmap_sizes,
             dtype=bbox_preds[0].dtype,
             device=bbox_preds[0].device)
+        
 
         mlvl_cls_scores = [cls_scores[i].detach() for i in range(num_levels)]
         mlvl_bbox_preds = [bbox_preds[i].detach() for i in range(num_levels)]

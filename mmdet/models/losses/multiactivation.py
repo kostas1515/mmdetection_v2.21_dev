@@ -7,87 +7,15 @@ from ..builder import LOSSES
 from .utils import weight_reduce_loss
 from .accuracy import accuracy
 
-
-def _expand_onehot_labels(labels, label_weights, label_channels, ignore_index):
-    """Expand onehot labels to match the size of prediction."""
-    bin_labels = labels.new_full((labels.size(0), label_channels), 0)
-    valid_mask = (labels >= 0) & (labels != ignore_index)
-    inds = torch.nonzero(
-        valid_mask & (labels < label_channels), as_tuple=False)
-
-    if inds.numel() > 0:
-        bin_labels[inds, labels[inds]] = 1
-
-    valid_mask = valid_mask.view(-1, 1).expand(labels.size(0),
-                                               label_channels).float()
-    if label_weights is None:
-        bin_label_weights = valid_mask
+def get_image_count_frequency(version="v0_5"):
+    if version == "v0_5":
+        from mmdet.utils.lvis_v0_5_categories import get_image_count_frequency
+        return get_image_count_frequency()
+    elif version == "v1":
+        from mmdet.utils.lvis_v1_0_categories import get_image_count_frequency
+        return get_image_count_frequency()
     else:
-        bin_label_weights = label_weights.view(-1, 1).repeat(1, label_channels)
-        bin_label_weights *= valid_mask
-
-    return bin_labels, bin_label_weights
-
-
-def binary_cross_entropy(pred,
-                         label,
-                         weight=None,
-                         reduction='mean',
-                         avg_factor=None,
-                         class_weight=None,
-                         ignore_index=-100):
-    """Calculate the binary CrossEntropy loss.
-
-    Args:
-        pred (torch.Tensor): The prediction with shape (N, 1).
-        label (torch.Tensor): The learning label of the prediction.
-        weight (torch.Tensor, optional): Sample-wise loss weight.
-        reduction (str, optional): The method used to reduce the loss.
-            Options are "none", "mean" and "sum".
-        avg_factor (int, optional): Average factor that is used to average
-            the loss. Defaults to None.
-        class_weight (list[float], optional): The weight for each class.
-        ignore_index (int | None): The label index to be ignored.
-            If None, it will be set to default value. Default: -100.
-
-    Returns:
-        torch.Tensor: The calculated loss.
-    """
-    # The default value of ignore_index is the same as F.cross_entropy
-    
-    ignore_index = -100 if ignore_index is None else ignore_index
-    if pred.dim() != label.dim():
-        label, weight = _expand_onehot_labels(label, weight, pred.size(-1)-3,
-                                              ignore_index)   
-    if weight is not None:
-        weight = weight.float()
-    
-    probability_weights = torch.softmax(pred[:,-3:],dim=1)
-    
-
-    pestim_g = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,:-3],min=-4,max=10)))))
-    pestim_s = torch.sigmoid(pred[:,:-3])
-    pestim_n=1/2+torch.erf(torch.clamp(pred[:,:-3],min=-5,max=5)/(2**(1/2)))/2
-    p_final = pestim_g*probability_weights[:,0:1]+pestim_s*probability_weights[:,1:2]+pestim_n*probability_weights[:,2:]
-#         print(pred)
-        
-#         with torch.no_grad():
-#             pos_grad = -(((2/np.pi)**(1/2))*torch.exp((-pred**2)/2))/(1+torch.erf(pred/(2**(1/2))))
-#             neg_grad= -(((2/np.pi)**(1/2))*torch.exp((-pred**2)/2))/(-1+torch.erf(pred/(2**(1/2))))
-#             print('pos is:',(pos_grad*label.float()).sum())
-#             print('neg is:',(neg_grad*(1-label.float())).sum())
-    
-    loss = F.binary_cross_entropy(
-        p_final, label.float(), reduction='none')
-    # do the reduction for the weighted loss
-    loss = weight_reduce_loss(
-        loss, weight, reduction=reduction, avg_factor=avg_factor)
-#     print('loss is:',loss)
-#     loss=torch.clamp(loss,min=0,max=20)
-    
-    return loss
-
-
+        raise KeyError(f"version {version} is not supported")
 
 @LOSSES.register_module()
 class MultiActivation(nn.Module):
@@ -97,7 +25,12 @@ class MultiActivation(nn.Module):
                  reduction='mean',
                  class_weight=None,
                  loss_weight=1.0,
-                 num_classes=1203):
+                 num_classes=1203,
+                 loss_cls='bce',
+                 lambda_=0.0011,
+                 version="v1",
+                 class_heads=2,
+                 with_kd=False):
         """CrossEntropyLoss.
 
         Args:
@@ -116,6 +49,9 @@ class MultiActivation(nn.Module):
         self.loss_weight = loss_weight
         self.class_weight = class_weight
         self.num_classes = num_classes
+        self.lambda_ = lambda_
+        self.version = version
+        self.freq_info = torch.FloatTensor(get_image_count_frequency(version))
         
         # custom output channels of the classifier
         self.custom_cls_channels = True
@@ -124,28 +60,52 @@ class MultiActivation(nn.Module):
         # custom accuracy of the classsifier
         self.custom_accuracy = True
 
+        self.class_heads = class_heads
 
-        self.cls_criterion = binary_cross_entropy
+        if loss_cls=='bce':
+            self.cls_criterion = self.binary_cross_entropy
+        elif loss_cls == 'focal':
+            self.cls_criterion = self.focal_loss
+        elif loss_cls == 'droploss':
+            self.cls_criterion = self.droploss
+
+
+        self.with_kd=with_kd
+
         
     def get_activation(self, cls_score):
         """Get custom activation of cls_score.
 
         Args:
-            cls_score (torch.Tensor): The prediction with shape (N, C).
+            cls_score (torch.Tensor): The prediction with shape (N, 3*C).
 
         Returns:
             torch.Tensor: The custom activation of cls_score with shape
                  (N, C).
         """
-        probability_weights = torch.softmax(cls_score[:,-3:],dim=-1)
+        scores = self.get_multi_act(cls_score)
 
-        scores_g = 1/(torch.exp(torch.exp(-cls_score[:,:-3])))
-        scores_s = torch.sigmoid(cls_score[:,:-3])
-        scores_n=1/2+torch.erf(cls_score[:,:-3]/(2**(1/2)))/2
-        scores= scores_g*probability_weights[:,0:1]+scores_s*probability_weights[:,1:2]+scores_n*probability_weights[:,2:]
-            
+
+        dummpy_prob = scores.new_zeros((scores.size(0), 1))
+        scores = torch.cat([scores, dummpy_prob], dim=1)
         
         return scores
+
+    def get_multi_act(self,pred):
+        pestim_g = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,:self.num_classes],min=-4,max=10)))))
+        pestim_n=1/2+torch.erf(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-5,max=6)/(2**(1/2)))/2
+        # pestim_n = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-4,max=10)))))
+        
+        if self.class_heads==3:
+            pestim_l=torch.sigmoid(pred[:,2*self.num_classes:-3])
+            probs = torch.softmax(pred[:,-3:],dim=-1)
+        else:
+            probs = pred[:,-1:].sigmoid()
+        if self.class_heads == 3:
+            p_final = (probs[:,0:1]*pestim_g+probs[:,1:2]*pestim_n+probs[:,2:]*pestim_l)
+        else:
+            p_final = probs*pestim_g+(1-probs)*pestim_n
+        return p_final
     
     def get_cls_channels(self, num_classes):
         """Get custom classification channels.
@@ -157,7 +117,7 @@ class MultiActivation(nn.Module):
             int: The custom classification channels.
         """
         assert num_classes == self.num_classes
-        return num_classes + 4
+        return num_classes
     
     def get_accuracy(self, cls_score, labels):
         """Get custom accuracy w.r.t. cls_score and labels.
@@ -170,11 +130,14 @@ class MultiActivation(nn.Module):
             Dict [str, torch.Tensor]: The accuracy for objectness and classes,
                  respectively.
         """
-        acc_classes = accuracy(cls_score[:,:-3], labels)
+        pos_inds = labels<self.num_classes
+        scores = self.get_multi_act(cls_score)
+        acc_classes = accuracy(scores[pos_inds], labels[pos_inds])
         acc = dict()
         acc['acc_classes'] = acc_classes
         
         return acc
+
     
 
     def forward(self,
@@ -204,7 +167,8 @@ class MultiActivation(nn.Module):
             class_weight = cls_score.new_tensor(self.class_weight)
         else:
             class_weight = None
-        loss_cls = self.loss_weight * self.cls_criterion(
+        total_loss=dict()
+        loss_cls = self.cls_criterion(
             cls_score,
             label,
             weight,
@@ -212,4 +176,228 @@ class MultiActivation(nn.Module):
             reduction=reduction,
             avg_factor=avg_factor,
             **kwargs)
-        return loss_cls
+        total_loss['loss_cls']=loss_cls
+        if self.with_kd is True:
+            total_loss['kd_loss'] = self.loss_weight * self.kd_loss(
+            cls_score,
+            **kwargs)
+        return total_loss
+
+
+    def binary_cross_entropy(self,
+                         pred,
+                         label,
+                         weight=None,
+                         reduction='mean',
+                         avg_factor=None,
+                         class_weight=None,
+                         ignore_index=-100):
+        """Calculate the binary CrossEntropy loss.
+
+        Args:
+            pred (torch.Tensor): The prediction with shape (N, 1).
+            label (torch.Tensor): The learning label of the prediction.
+            weight (torch.Tensor, optional): Sample-wise loss weight.
+            reduction (str, optional): The method used to reduce the loss.
+                Options are "none", "mean" and "sum".
+            avg_factor (int, optional): Average factor that is used to average
+                the loss. Defaults to None.
+            class_weight (list[float], optional): The weight for each class.
+            ignore_index (int | None): The label index to be ignored.
+                If None, it will be set to default value. Default: -100.
+
+        Returns:
+            torch.Tensor: The calculated loss.
+        """
+        # The default value of ignore_index is the same as F.cross_entropy
+
+        self.n_i, _ = pred.size()
+
+        def expand_label(pred, gt_classes):
+            n_i = pred.size()[0]
+            target = pred.new_zeros(n_i, self.num_classes + 1)
+            target[torch.arange(n_i), gt_classes] = 1
+            return target[:, :self.num_classes]
+
+        if weight is not None:
+            weight = weight.float()
+
+        target = expand_label(pred, label)
+
+        p_final = self.get_multi_act(pred)
+        
+#         loss = -(target.float()*torch.log(p_final)+(1.0-target.float())*torch.log(1-p_final))
+        loss = F.binary_cross_entropy(
+            p_final, target.float(), reduction='none')
+        
+        # do the reduction for the weighted loss
+        loss[torch.isnan(loss)]=0.0
+        loss[torch.isinf(loss)]=0.0
+        
+        loss = loss.sum()/self.n_i
+        # loss=torch.clamp(loss,min=0,max=30)
+        
+        return loss
+
+
+    def focal_loss(self,
+                    pred,
+                    label,
+                    weight=None,
+                    alpha=0.25,
+                    gamma=2,
+                    reduction='mean',
+                    avg_factor=None,
+                    class_weight=None,
+                    ignore_index=-100):
+        """Calculate the binary CrossEntropy loss.
+
+        Args:
+            pred (torch.Tensor): The prediction with shape (N, 1).
+            label (torch.Tensor): The learning label of the prediction.
+            weight (torch.Tensor, optional): Sample-wise loss weight.
+            reduction (str, optional): The method used to reduce the loss.
+                Options are "none", "mean" and "sum".
+            avg_factor (int, optional): Average factor that is used to average
+                the loss. Defaults to None.
+            class_weight (list[float], optional): The weight for each class.
+            ignore_index (int | None): The label index to be ignored.
+                If None, it will be set to default value. Default: -100.
+
+        Returns:
+            torch.Tensor: The calculated loss.
+        """
+        # The default value of ignore_index is the same as F.cross_entropy
+
+        self.n_i, _ = pred.size()
+
+        def expand_label(pred, gt_classes):
+            n_i = pred.size()[0]
+            target = pred.new_zeros(n_i, self.num_classes + 1)
+            target[torch.arange(n_i), gt_classes] = 1
+            return target[:, :self.num_classes]
+
+        if weight is not None:
+            weight = weight.float()
+
+
+        target = expand_label(pred, label)
+        
+        p_final = self.get_multi_act(pred)
+
+        pt = (1 - p_final) * target + p_final * (1 - target)
+        focal_weight = (alpha * target + (1 - alpha) *
+                        (1 - target)) * pt.pow(gamma)
+
+        loss = F.binary_cross_entropy(
+            p_final, target.float(), reduction='none')*focal_weight
+        
+        # do the reduction for the weighted loss
+        loss[torch.isnan(loss)]=0.0
+        loss = loss.sum()/self.n_i
+        # loss=torch.clamp(loss,min=0,max=30)
+        
+        return loss
+
+    def kd_loss(self,
+                pred,
+                tau=2.0,
+                gamma=2.0):
+        """Calculate the binary CrossEntropy loss.
+
+        Args:
+            pred (torch.Tensor): The prediction with shape (N, 1).
+            label (torch.Tensor): The learning label of the prediction.
+            weight (torch.Tensor, optional): Sample-wise loss weight.
+            reduction (str, optional): The method used to reduce the loss.
+                Options are "none", "mean" and "sum".
+            avg_factor (int, optional): Average factor that is used to average
+                the loss. Defaults to None.
+            class_weight (list[float], optional): The weight for each class.
+            ignore_index (int | None): The label index to be ignored.
+                If None, it will be set to default value. Default: -100.
+
+        Returns:
+            torch.Tensor: The calculated loss.
+        """
+        # The default value of ignore_index is the same as F.cross_entropy
+
+        self.n_i, _ = pred.size()
+        pestim_g = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,0:self.num_classes],min=-4,max=10)))))
+        pestim_n=1/2+torch.erf(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-5,max=6)/(2**(1/2)))/2
+
+        soft_pestim_g = pestim_g/tau
+        soft_pestim_n = pestim_n/tau
+
+        focal_weight = torch.abs(soft_pestim_g-soft_pestim_n).pow(gamma)
+
+        kd_loss1 = F.binary_cross_entropy(soft_pestim_g,soft_pestim_n,reduction='none')
+        kd_loss2 = F.binary_cross_entropy(soft_pestim_n,soft_pestim_g,reduction='none')
+        kd_loss = ((kd_loss1+kd_loss2)*focal_weight)/2
+        kd_loss[torch.isnan(kd_loss)]=0.0
+        kd_loss = kd_loss.sum()
+
+        # print(kd_loss)
+
+        return kd_loss
+
+    
+    def droploss(self,
+                cls_score,
+                label,
+                weight=None,
+                avg_factor=None,
+                reduction_override=None,
+                **kwargs):
+        
+        self.n_i, _ = cls_score.size()
+        
+        self.gt_classes = label
+        p_final = self.get_multi_act(cls_score)
+        self.pred_class_logits = p_final
+
+        def expand_label(pred, gt_classes):
+            target = pred.new_zeros(self.n_i, self.num_classes + 1)
+            target[torch.arange(self.n_i), gt_classes] = 1
+            return target[:, :self.num_classes]
+
+        target = expand_label(p_final, label)
+        drop_w = 1 - self.threshold_func() * (1 - target)
+        
+#         cls_loss = -(target.float()*torch.log(p_final)+(1.0-target.float())*torch.log(1-p_final))
+        cls_loss = F.binary_cross_entropy(p_final, target,reduction='none')
+        cls_loss = torch.sum(cls_loss * drop_w) / self.n_i
+
+        return cls_loss
+
+
+    def exclude_func_and_ratio(self):
+        
+        # instance-level weight
+        bg_ind = self.num_classes
+        weight = (self.gt_classes != bg_ind)
+
+        gt_classes    = self.gt_classes[weight]
+        exclude_ratio = torch.mean((self.freq_info[gt_classes] < self.lambda_).float())
+
+        weight = weight.float().view(self.n_i, 1).expand(self.n_i, self.num_classes)
+
+        return weight, exclude_ratio
+
+    def threshold_func(self):
+        # class-level weight
+        weight = self.pred_class_logits.new_zeros(self.num_classes)
+        weight[self.freq_info < self.lambda_] = 1
+        weight = weight.view(1, self.num_classes).expand(self.n_i, self.num_classes)
+
+
+        fg, ratio = self.exclude_func_and_ratio()
+        bg = 1 - fg
+        random = torch.rand_like(bg) * bg
+
+        random = torch.where(random>ratio, torch.ones_like(random), torch.zeros_like(random))
+        
+        weight = (random + fg) * weight
+
+        return weight
+    

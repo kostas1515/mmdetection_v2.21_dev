@@ -22,12 +22,11 @@ model = dict(
         add_extra_convs='on_output',
         num_outs=5),
     bbox_head=dict(
-        type='GFocalHead',
+        type='GFLHead',
         num_classes=1203,
         in_channels=256,
         stacked_convs=4,
         feat_channels=256,
-        use_gumbel=True,
         anchor_generator=dict(
             type='AnchorGenerator',
             ratios=[1.0],
@@ -37,13 +36,10 @@ model = dict(
         loss_cls=dict(
             type='QualityFocalLoss',
             use_sigmoid=False,       
-            beta=0.0,
-            loss_weight=0.1),
+            beta=2.0,
+            loss_weight=1.0),
         loss_dfl=dict(type='DistributionFocalLoss', loss_weight=0.25),
         reg_max=16,
-        reg_topk=4,
-        reg_channels=64,
-        add_mean=True,
         loss_bbox=dict(type='GIoULoss', loss_weight=2.0)))
 # training and testing settings
 train_cfg = dict(
@@ -83,4 +79,4 @@ train_pipeline = [
 data = dict(train=dict(dataset=dict(pipeline=train_pipeline)))
 fp16 = dict(loss_scale=512.) 
 
-work_dir ='./experiments/gfocal_r50_fpn_2x_lvis_gumbel_b0_a01/'
+work_dir ='./experiments/test/'

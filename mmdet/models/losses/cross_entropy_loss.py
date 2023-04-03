@@ -104,6 +104,7 @@ def binary_cross_entropy(pred,
     # weighted element-wise losses
     if weight is not None:
         weight = weight.float()
+
     loss = F.binary_cross_entropy_with_logits(
         pred, label.float(), pos_weight=class_weight, reduction='none')
     # do the reduction for the weighted loss
@@ -169,6 +170,62 @@ def mask_cross_entropy(pred,
     return loss.mean()[None]
 
 
+def mask_cross_entropy_activated(pred,
+                       target,
+                       label,
+                       reduction='mean',
+                       avg_factor=None,
+                       class_weight=None,
+                       ignore_index=None):
+    """Calculate the CrossEntropy loss for masks.
+
+    Args:
+        pred (torch.Tensor): The prediction with shape (N, C, *), C is the
+            number of classes. The trailing * indicates arbitrary shape.
+        target (torch.Tensor): The learning label of the prediction.
+        label (torch.Tensor): ``label`` indicates the class label of the mask
+            corresponding object. This will be used to select the mask in the
+            of the class which the object belongs to when the mask prediction
+            if not class-agnostic.
+        reduction (str, optional): The method used to reduce the loss.
+            Options are "none", "mean" and "sum".
+        avg_factor (int, optional): Average factor that is used to average
+            the loss. Defaults to None.
+        class_weight (list[float], optional): The weight for each class.
+        ignore_index (None): Placeholder, to be consistent with other loss.
+            Default: None.
+
+    Returns:
+        torch.Tensor: The calculated loss
+
+    Example:
+        >>> N, C = 3, 11
+        >>> H, W = 2, 2
+        >>> pred = torch.randn(N, C, H, W) * 1000
+        >>> target = torch.rand(N, H, W)
+        >>> label = torch.randint(0, C, size=(N,))
+        >>> reduction = 'mean'
+        >>> avg_factor = None
+        >>> class_weights = None
+        >>> loss = mask_cross_entropy(pred, target, label, reduction,
+        >>>                           avg_factor, class_weights)
+        >>> assert loss.shape == (1,)
+    """
+    assert ignore_index is None, 'BCE loss does not support ignore_index'
+    # TODO: handle these two reserved arguments
+    assert reduction == 'mean' and avg_factor is None
+    num_rois = pred.size()[0]
+    inds = torch.arange(0, num_rois, dtype=torch.long, device=pred.device)
+    pred_slice = pred[inds, label].squeeze(1)
+#     loss = -(target*torch.log(pred_slice)+(1-target)*torch.log(1-pred_slice))
+    loss = F.binary_cross_entropy(
+        pred_slice, target, weight=class_weight, reduction='none')
+    loss[torch.isnan(loss)]=0.0
+    loss[torch.isinf(loss)]=0.0
+    
+    return loss.mean()[None]
+
+
 @LOSSES.register_module()
 class CrossEntropyLoss(nn.Module):
 
@@ -178,7 +235,8 @@ class CrossEntropyLoss(nn.Module):
                  reduction='mean',
                  class_weight=None,
                  ignore_index=None,
-                 loss_weight=1.0):
+                 loss_weight=1.0,
+                 activated=False):
         """CrossEntropyLoss.
 
         Args:
@@ -202,11 +260,15 @@ class CrossEntropyLoss(nn.Module):
         self.loss_weight = loss_weight
         self.class_weight = class_weight
         self.ignore_index = ignore_index
+        self.activated = activated
 
         if self.use_sigmoid:
             self.cls_criterion = binary_cross_entropy
         elif self.use_mask:
-            self.cls_criterion = mask_cross_entropy
+            if self.activated is True:
+                self.cls_criterion = mask_cross_entropy_activated
+            else:
+                self.cls_criterion = mask_cross_entropy
         else:
             self.cls_criterion = cross_entropy
 
