@@ -242,6 +242,7 @@ class ConvFCDisentangledBBoxHead(ConvFCBBoxHead):
         
         
         switch_logit = self.switch(self.relu(self.hidden_switch[0](x_switch))) if self.with_cls else None
+        switch_logit = torch.clamp(switch_logit,min=-12,max=12)
         cls_score = torch.cat([cls_score,switch_logit],1) # channel-wise concatenation
 
         bbox_pred = self.fc_reg(x_reg) if self.with_reg else None

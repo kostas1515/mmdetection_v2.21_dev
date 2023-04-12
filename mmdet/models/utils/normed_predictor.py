@@ -19,26 +19,36 @@ class NormedLinear(nn.Linear):
              keep numerical stability. Default to 1e-6.
     """
 
-    def __init__(self, *args, tempearture=20, power=1.0, eps=1e-6,bias=0, **kwargs):
+    def __init__(self, *args, tempearture=20, power=1.0, eps=1e-6, init_bias=0,learnable_temp=False,learnable_init_value=4.0,**kwargs):
         super(NormedLinear, self).__init__(*args, **kwargs)
-        self.tempearture = tempearture
+        self.learnable_temp =learnable_temp
+        if self.learnable_temp is True:
+            self.tempearture = Parameter(torch.FloatTensor(1).cuda())
+            self.learnable_init_value = learnable_init_value
+        else:
+            self.tempearture = tempearture
         self.power = power
         self.eps = eps
-        self.bias_init=bias
+        self.init_bias = init_bias
         self.init_weights()
-        
-        
 
     def init_weights(self):
         nn.init.normal_(self.weight, mean=0, std=0.01)
         if self.bias is not None:
-            nn.init.constant_(self.bias, self.bias_init)
+            nn.init.constant_(self.bias, self.init_bias)
+        if self.learnable_temp is True:
+            self.tempearture.data.fill_(self.learnable_init_value)
 
     def forward(self, x):
         weight_ = self.weight / (
             self.weight.norm(dim=1, keepdim=True).pow(self.power) + self.eps)
         x_ = x / (x.norm(dim=1, keepdim=True).pow(self.power) + self.eps)
-        x_ = x_ * self.tempearture
+#         x_ = x_ * self.tempearture
+        
+        if self.learnable_temp is True:
+            x_ = x_ * (self.tempearture**2)
+        else:
+            x_ = x_ * self.tempearture
 
         return F.linear(x_, weight_, self.bias)
 
@@ -64,9 +74,11 @@ class NormedConv2d(nn.Conv2d):
                  norm_over_kernel=False,
                  learnable_temp=False,
                  learnable_init_value=5.0,
+                 init_bias=0,
                  **kwargs):
         super(NormedConv2d, self).__init__(*args, **kwargs)
         self.learnable_temp =learnable_temp
+        self.init_bias = init_bias
         if self.learnable_temp is True:
             self.tempearture = Parameter(torch.FloatTensor(1).cuda())
             self.learnable_init_value = learnable_init_value
@@ -79,7 +91,7 @@ class NormedConv2d(nn.Conv2d):
     def init_weights(self):
         nn.init.normal_(self.weight, mean=0, std=0.01)
         if self.bias is not None:
-            nn.init.constant_(self.bias, 0.0)
+            nn.init.constant_(self.bias, self.init_bias)
         if self.learnable_temp is True:
             self.tempearture.data.fill_(self.learnable_init_value)
 

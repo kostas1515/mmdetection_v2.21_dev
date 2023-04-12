@@ -15,12 +15,12 @@ from mmdet.models.builder import HEADS, build_loss
 BYTES_PER_FLOAT = 4
 # TODO: This memory limit may be too much or too little. It would be better to
 # determine it based on available resources.
-GPU_MEM_LIMIT = 1024**3  # 1 GB memory limit
+GPU_MEM_LIMIT = 2048**2  # 1 GB memory limit
 
 @HEADS.register_module()
 class MultiFCNMaskHead(nn.Module):
     def __init__(self,
-                 num_convs=4,
+                 num_convs=3,
                  roi_feat_size=14,
                  in_channels=256,
                  conv_kernel_size=3,
@@ -77,11 +77,11 @@ class MultiFCNMaskHead(nn.Module):
                         conv_cfg=conv_cfg,
                         norm_cfg=norm_cfg))
         
-        self.switch = nn.ConvTranspose2d(
-                    in_channels,
-                    1,
-                    kernel_size=self.scale_factor,
-                    stride=self.scale_factor).cuda()
+#         self.switch = nn.ConvTranspose2d(
+#                     in_channels,
+#                     1,
+#                     kernel_size=self.scale_factor,
+#                     stride=self.scale_factor).cuda()
 
         upsample_in_channels = (
             self.conv_out_channels if self.num_convs > 0 else in_channels)
@@ -108,7 +108,6 @@ class MultiFCNMaskHead(nn.Module):
                 mode=self.upsample_method,
                 align_corners=align_corners)
             self.upsample = nn.ModuleList([build_upsample_layer(upsample_cfg_) for head in range(self.class_heads)])
-        
 
         out_channels = 1 if self.class_agnostic else self.num_classes
         logits_in_channel = (
@@ -116,12 +115,22 @@ class MultiFCNMaskHead(nn.Module):
             if self.upsample_method == 'deconv' else upsample_in_channels)
         self.conv_logits = nn.ModuleList([build_conv_layer(self.predictor_cfg,
                                             logits_in_channel, out_channels, 1) for head in range(self.class_heads)])
+        
+        self.switch = nn.Sequential(ConvModule(
+                        in_channels,
+                        self.conv_out_channels,
+                        self.conv_kernel_size,
+                        padding=padding,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg),build_upsample_layer(upsample_cfg_),build_conv_layer(dict(type='Conv'),
+                                            logits_in_channel, 1, 1)).cuda()
         self.relu = nn.ReLU(inplace=True)
         self.debug_imgs = None
         
     @auto_fp16()
     def forward(self, x):
         switch_logit  = self.switch(x)
+        switch_logit = torch.clamp(switch_logit,min=-12,max=12)
         x_out=[x for head in range(self.class_heads)]
         for head,conv in enumerate(self.convs):
             x_out[head % self.class_heads]=conv(x_out[head % self.class_heads])
