@@ -7,10 +7,11 @@ from .double_bbox_head import DoubleConvFCBBoxHead
 from .sabl_head import SABLHead
 from .scnet_bbox_head import SCNetBBoxHead
 from .multi_head_v2 import (DisentangledMultiActivationBBoxHead, ConvFCDisentangledBBoxHead)
+from .multi_sibling_head import (SharedMultiSibling, SharedMultiSibling)
                                
 
 __all__ = [
     'BBoxHead', 'ConvFCBBoxHead', 'Shared2FCBBoxHead',
     'Shared4Conv1FCBBoxHead', 'DoubleConvFCBBoxHead', 'SABLHead', 'DIIHead',
-    'SCNetBBoxHead','DisentangledMultiActivationBBoxHead','ConvFCDisentangledBBoxHead'
+    'SCNetBBoxHead','DisentangledMultiActivationBBoxHead','ConvFCDisentangledBBoxHead','SharedMultiSibling', 'SharedMultiSibling'
 ]

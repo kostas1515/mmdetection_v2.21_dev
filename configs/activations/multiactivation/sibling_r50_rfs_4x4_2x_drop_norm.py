@@ -2,7 +2,6 @@ _base_ = [
     '../../lvis/mask_rcnn_r50_fpn_sample1e-3_mstrain_2x_lvis_v1.py'
 ]
 # fp16 = dict(loss_scale=512.)
-data=dict(samples_per_gpu=4)
 
 model = dict(roi_head=dict(bbox_head=dict(type='SharedMultiSibling',
                                             loss_cls=dict(type="MultiActivation",loss_cls='droploss',class_heads=2),
@@ -10,6 +9,6 @@ model = dict(roi_head=dict(bbox_head=dict(type='SharedMultiSibling',
                         mask_head=dict(predictor_cfg=dict(type='NormedConv2d', tempearture=20))),
         test_cfg = dict(rcnn=dict(nms=dict(type='nms', iou_threshold=0.3))))
 
-work_dir='./experiments/activations/sibling_r50_rfs_4x4_2x_drop_norm/'
-# work_dir='./experiments/activations/test/'
+# work_dir='./experiments/activations/multi_r50_rfs_4x4_2x_dropnorm_gumbel_normal_2h/'
 # auto_scale_lr = dict(enable=True, base_batch_size=16)
+work_dir='./experiments/test/'
