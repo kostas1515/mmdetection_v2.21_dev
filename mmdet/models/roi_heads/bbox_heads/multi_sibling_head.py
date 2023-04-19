@@ -108,24 +108,9 @@ class MultiSibling(BBoxHead):
                 in_features=self.reg_last_dim,
                 out_features=out_dim_reg) for h in range(self.class_heads)])
             
-        _, self.hidden_switch_cls, self.switch_dim = self._add_conv_fc_branch(0, 1, self.in_channels,True)
-        _, self.hidden_switch_reg, self.switch_dim = self._add_conv_fc_branch(0, 1, self.in_channels,True)
+        _, self.hidden_switch, self.switch_dim = self._add_conv_fc_branch(0, 1, self.in_channels,True)
         
-        if self.class_heads>2:
-            self.switch_cls = build_linear_layer(
-                self.cls_predictor_cfg,
-                in_features=self.switch_dim,
-                out_features=class_heads)
-            self.switch_reg = build_linear_layer(
-                self.cls_predictor_cfg,
-                in_features=self.switch_dim,
-                out_features=class_heads)
-        else:
-            self.switch_cls = build_linear_layer(
-                self.cls_predictor_cfg,
-                in_features=self.switch_dim,
-                out_features=1)
-            self.switch_reg = build_linear_layer(
+        self.switch = build_linear_layer(
                 self.cls_predictor_cfg,
                 in_features=self.switch_dim,
                 out_features=1)
@@ -247,13 +232,11 @@ class MultiSibling(BBoxHead):
                 x_switch = self.avg_pool(x_switch)
             x_switch = x_switch.flatten(1)
             
-        switch_logit_cls = self.switch_cls(self.relu(self.hidden_switch_cls[0](x_switch))) if self.with_cls else None
-        switch_logit_cls = torch.clamp(switch_logit_cls,min=-12,max=12)
-        cls_score = torch.cat([cls_score,switch_logit_cls],1)
+        switch_logit = self.switch(self.relu(self.hidden_switch[0](x_switch)))
+        switch_logit = torch.clamp(switch_logit,min=-12,max=12)
+        cls_score = torch.cat([cls_score,switch_logit],1)
         
-        switch_logit_reg= self.switch_reg(self.relu(self.hidden_switch_reg[0](x_switch))) if self.with_reg else None
-        switch_logit_reg = torch.clamp(switch_logit_reg,min=-12,max=12)
-        reg_prob = switch_logit_reg.sigmoid()
+        reg_prob = switch_logit.sigmoid()
         final_bbox_pred = bbox_pred[0]*reg_prob + bbox_pred[1]*(1.0-reg_prob)
             
         return cls_score, final_bbox_pred

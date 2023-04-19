@@ -27,6 +27,7 @@ class ConvFCDisentangledBBoxHead(ConvFCBBoxHead):
                  init_cfg=None,
                  class_heads=2,
                  weight_similarity_loss=None,
+                 with_obj=False,
                  *args,
                  **kwargs):
         super(ConvFCBBoxHead, self).__init__(
@@ -49,6 +50,8 @@ class ConvFCDisentangledBBoxHead(ConvFCBBoxHead):
         self.fc_out_channels = fc_out_channels
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
+        self.with_obj = with_obj #this will add an extra logit in the switch layer to predict obj/nobj
+        
         if weight_similarity_loss is not None:
             self.weight_similarity_loss = build_loss(weight_similarity_loss)
             self.cos_similarity  = torch.nn.CosineSimilarity(dim=1, eps=1e-08)
@@ -110,12 +113,12 @@ class ConvFCDisentangledBBoxHead(ConvFCBBoxHead):
                 self.switch = build_linear_layer(
                     self.cls_predictor_cfg,
                     in_features=self.switch_dim,
-                    out_features=class_heads)
+                    out_features=class_heads+(self.with_obj+0))
             else:
                 self.switch = build_linear_layer(
                     self.cls_predictor_cfg,
                     in_features=self.switch_dim,
-                    out_features=1)
+                    out_features=1+(self.with_obj+0))#this will add an extra logit in the switch layer to predict obj/nobj
 
         if self.with_reg:
             out_dim_reg = (4 if self.reg_class_agnostic else 4 *

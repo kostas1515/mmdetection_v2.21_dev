@@ -30,7 +30,8 @@ class MultiActivation(nn.Module):
                  lambda_=0.0011,
                  version="v1",
                  class_heads=2,
-                 with_kd=False):
+                 with_kd=False,
+                 with_obj=False):
         """CrossEntropyLoss.
 
         Args:
@@ -51,7 +52,7 @@ class MultiActivation(nn.Module):
         self.num_classes = num_classes
         self.lambda_ = lambda_
         self.version = version
-        self.freq_info = torch.FloatTensor(get_image_count_frequency(version))
+        self.freq_info = torch.FloatTensor(get_image_count_frequency(version)).cuda()
         
         # custom output channels of the classifier
         self.custom_cls_channels = True
@@ -61,6 +62,9 @@ class MultiActivation(nn.Module):
         self.custom_accuracy = True
 
         self.class_heads = class_heads
+        self.with_obj = with_obj
+        self.with_kd=with_kd
+        
 
         if loss_cls=='bce':
             self.cls_criterion = self.binary_cross_entropy
@@ -69,10 +73,14 @@ class MultiActivation(nn.Module):
         elif loss_cls == 'droploss':
             self.cls_criterion = self.droploss
 
-
-        self.with_kd=with_kd
-
-        
+    def get_objectness(self, cls_score):
+        #predicts whether box is bg, aka 1 -> bg, 0 -> fg
+        if self.class_heads==3:
+            return cls_score[:,-4:-3].sigmoid()
+        else:
+            return cls_score[:,-2:-1].sigmoid()
+            
+    
     def get_activation(self, cls_score):
         """Get custom activation of cls_score.
 
@@ -84,7 +92,8 @@ class MultiActivation(nn.Module):
                  (N, C).
         """
         scores = self.get_multi_act(cls_score)
-
+        if self.with_obj is True:
+            scores = scores * (1.0-self.get_objectness(cls_score))
 
         dummpy_prob = scores.new_zeros((scores.size(0), 1))
         scores = torch.cat([scores, dummpy_prob], dim=1)
@@ -97,7 +106,7 @@ class MultiActivation(nn.Module):
         # pestim_n = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-4,max=10)))))
         
         if self.class_heads==3:
-            pestim_l=torch.sigmoid(pred[:,2*self.num_classes:-3])
+            pestim_l=torch.sigmoid(pred[:,2*self.num_classes:3*self.num_classes])
             probs = torch.softmax(pred[:,-3:],dim=-1)
         else:
             probs = pred[:,-1:].sigmoid()
@@ -135,7 +144,11 @@ class MultiActivation(nn.Module):
         acc_classes = accuracy(scores[pos_inds], labels[pos_inds])
         acc = dict()
         acc['acc_classes'] = acc_classes
-        
+        if self.with_obj is True:
+            obj_labels = (labels == self.num_classes).long()
+            cls_score_objectness = self.get_objectness(cls_score)
+            acc_objectness = accuracy(cls_score_objectness, obj_labels)
+            acc['acc_objectness'] = acc_objectness
         return acc
 
     
@@ -181,6 +194,12 @@ class MultiActivation(nn.Module):
             total_loss['kd_loss'] = self.loss_weight * self.kd_loss(
             cls_score,
             **kwargs)
+        
+        if self.with_obj is True:
+            total_loss['obj_loss'] = self.loss_weight * self.objectness_loss(
+            cls_score,label,
+            **kwargs)
+            
         return total_loss
 
 
@@ -369,7 +388,19 @@ class MultiActivation(nn.Module):
         cls_loss = torch.sum(cls_loss * drop_w) / self.n_i
 
         return cls_loss
-
+    
+    def objectness_loss(self,
+                        cls_score,
+                        labels):
+        
+        n_i, _ = cls_score.size()
+        
+        obj_labels = (labels == self.num_classes).float().unsqueeze(1)
+        p_final = self.get_objectness(cls_score)
+        loss_cls_objectness = F.binary_cross_entropy(p_final, obj_labels,reduction='none')
+        loss = loss_cls_objectness.sum()/n_i
+        
+        return loss
 
     def exclude_func_and_ratio(self):
         
