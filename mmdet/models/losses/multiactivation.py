@@ -102,8 +102,8 @@ class MultiActivation(nn.Module):
 
     def get_multi_act(self,pred):
         pestim_g = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,:self.num_classes],min=-4,max=10)))))
-        pestim_n=1/2+torch.erf(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-5,max=6)/(2**(1/2)))/2
-        # pestim_n = 1/(torch.exp(torch.exp(-(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-4,max=10)))))
+#         pestim_n=1/2+torch.erf(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-5,max=6)/(2**(1/2)))/2
+        pestim_n=(torch.clamp(pred[:,self.num_classes:2*self.num_classes],min=-12.0,max=12.0)).sigmoid()
         
         if self.class_heads==3:
             pestim_l=torch.sigmoid(pred[:,2*self.num_classes:3*self.num_classes])

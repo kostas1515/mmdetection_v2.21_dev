@@ -114,6 +114,50 @@ def binary_cross_entropy(pred,
     return loss
 
 
+def binary_cross_entropy_activated(pred,
+                         label,
+                         weight=None,
+                         reduction='mean',
+                         avg_factor=None,
+                         class_weight=None,
+                         ignore_index=-100):
+    """Calculate the binary CrossEntropy loss.
+
+    Args:
+        pred (torch.Tensor): The prediction with shape (N, 1).
+        label (torch.Tensor): The learning label of the prediction.
+        weight (torch.Tensor, optional): Sample-wise loss weight.
+        reduction (str, optional): The method used to reduce the loss.
+            Options are "none", "mean" and "sum".
+        avg_factor (int, optional): Average factor that is used to average
+            the loss. Defaults to None.
+        class_weight (list[float], optional): The weight for each class.
+        ignore_index (int | None): The label index to be ignored.
+            If None, it will be set to default value. Default: -100.
+
+    Returns:
+        torch.Tensor: The calculated loss.
+    """
+    # The default value of ignore_index is the same as F.cross_entropy
+    ignore_index = -100 if ignore_index is None else ignore_index
+    if pred.dim() != label.dim():
+        label, weight = _expand_onehot_labels(label, weight, pred.size(-1),
+                                              ignore_index)
+
+    # weighted element-wise losses
+    if weight is not None:
+        weight = weight.float()
+
+    loss = F.binary_cross_entropy(
+        pred, label.float(), reduction='none')
+    # do the reduction for the weighted loss
+    loss = weight_reduce_loss(
+        loss, weight, reduction=reduction, avg_factor=avg_factor)
+
+    return loss
+
+
+
 def mask_cross_entropy(pred,
                        target,
                        label,
@@ -263,7 +307,10 @@ class CrossEntropyLoss(nn.Module):
         self.activated = activated
 
         if self.use_sigmoid:
-            self.cls_criterion = binary_cross_entropy
+            if self.activated is True:
+                self.cls_criterion = binary_cross_entropy_activated
+            else:
+                self.cls_criterion = binary_cross_entropy
         elif self.use_mask:
             if self.activated is True:
                 self.cls_criterion = mask_cross_entropy_activated
